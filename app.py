@@ -32,12 +32,18 @@ with st.sidebar:
  cap=st.number_input('EU delivered footprint cap (kgCO₂e/kWh)',value=65.0 if year<2035 else 60.0,step=1.0)
  coverage=st.slider('Maximum customer supply share',0.1,1.0,0.7,0.05)
  penalty=st.slider('Unserved target penalty ($/kWh)',0,150,150,5)
+ st.divider()
+ st.subheader('Capacity expansion · experimental')
+ expansion=st.slider('Additional capacity at selected EU factory (GWh/year)',0,80,0,5,help='Hypothetical extra capacity; not approved investment, costed NPV or guaranteed supply.')
  st.caption('New plants assumed fully operational in 2031+ for this static annual allocation; before 2031 they are excluded. This does not calculate project NPV.')
 
 names=nodes.demand_id.tolist(); selected=base_ids+([options[choice]] if options[choice] and year>=2031 else [])
 active=fac.set_index('factory_id').loc[selected].copy()
 active['capacity']=active['target_capacity_gwh_yr']
 if year==2026:active['capacity']=active['current_capacity_gwh_yr']
+expansion_factory_id=options[choice] if options[choice] in active.index else None
+if expansion_factory_id is not None and expansion>0:
+ active.loc[expansion_factory_id,'capacity']+=expansion
 dem=nodes.set_index('demand_id').loc[names].copy()
 dem['demand_gwh']=dem.annual_ev_battery_demand_GWh_2026*(1+dem.growth_rate_2026_2030)**(min(year,2030)-2026)*(1+dem.growth_rate_2031_2045)**max(0,year-2030)
 dem['target_gwh']=dem.demand_gwh*coverage
@@ -80,7 +86,7 @@ col[2].metric('Unserved target',f'{unmet.sum():,.1f} GWh')
 col[3].metric('EU allocated',f'{x[:,europe_mask].sum():,.1f} GWh')
 st.info('Optimization is a one-year cost + unserved-target-penalty model. Penalty is a user-defined assumption; results are not a 20-year investment NPV or a confirmed OEM contract.')
 
-tabs=st.tabs(['Executive Dashboard','🌍 Global Network Map','Allocation','Factories','Carbon','Investment scenarios','Risk Monitoring','Board Report & Evidence','Model notes'])
+tabs=st.tabs(['Executive Dashboard','🌍 Global Network Map','Allocation','Factories','Carbon','Investment scenarios','Risk Monitoring','Board Report & Evidence','Model notes','🛠 Capacity Expansion'])
 with tabs[1]:
  st.subheader(f'Global production & customer network · {year}')
  st.caption('Thin straight lines represent optimized factory-to-customer allocations (GWh), not actual shipping routes. Hover over lines for shipment amounts.')
@@ -215,3 +221,39 @@ with tabs[7]:
          'MODEL LIMITATION: Annual cost allocation is not investment NPV. NPV values are supplied separately by the case exhibit.\n')
  st.download_button('Download board evidence TXT',report.encode('utf-8'),file_name='board_evidence.txt',mime='text/plain')
  st.info('For the final PDF, cite the case exhibits, include scenario assumptions, and provide the publicly deployed app URL only after testing it in a private browser window.')
+
+
+with tabs[9]:
+ st.subheader(f'Capacity Expansion & Re-optimization | {year}')
+ st.caption('Hypothetical expansion of the selected European candidate plant; allocation is re-solved using the existing linear program, carbon restrictions, and customer share cap. This is not an investment NPV, construction schedule, or approved factory plan.')
+ if expansion_factory_id is None:
+  st.warning('Choose a European investment alternative and a year from 2031 onward in the sidebar. Then adjust the additional-capacity slider.')
+ else:
+  base_bub=bub.copy()
+  factory_pos=list(active.index).index(expansion_factory_id)
+  base_bub[factory_pos]-=float(expansion)
+  base_sol=linprog(objective,A_ub=Aub,b_ub=base_bub,A_eq=Aeq,b_eq=beq,bounds=bounds,method='highs')
+  if not base_sol.success:
+   st.error('Baseline optimization could not be solved: '+base_sol.message)
+  else:
+   base_alloc=base_sol.x[:m*n].reshape(m,n)
+   base_shortage=float(base_sol.x[m*n:].sum())
+   new_shortage=float(unmet.sum())
+   c1,c2,c3,c4=st.columns(4)
+   c1.metric('Original capacity',f'{base_bub.sum():.1f} GWh')
+   c2.metric('Expanded capacity',f'{bub.sum():.1f} GWh')
+   c3.metric('Original unserved target',f'{base_shortage:.1f} GWh')
+   c4.metric('Remaining unserved target',f'{new_shortage:.1f} GWh',delta=f'{new_shortage-base_shortage:+.1f} GWh',delta_color='inverse')
+   st.markdown(f'**Expanded site:** {active.loc[expansion_factory_id,"factory_name"]} (+{expansion} GWh/year)')
+   chart_data=pd.DataFrame({'Without expansion':[base_bub.sum(),base_alloc.sum(),base_shortage], 'With expansion':[bub.sum(),served,new_shortage]},index=['Factory capacity (GWh)','Allocated (GWh)','Unserved target (GWh)'])
+   st.dataframe(chart_data.style.format('{:.1f}'),use_container_width=True)
+   st.bar_chart(pd.DataFrame({'Baseline':[base_shortage,base_alloc.sum()],'Expansion':[new_shortage,served]},index=['Unserved target','Allocated']))
+   eu_base=float(base_alloc[:,europe_mask].sum())
+   eu_new=float(x[:,europe_mask].sum())
+   st.write(f'EU allocated: {eu_base:.1f} → {eu_new:.1f} GWh. Actual remaining shortage depends on customer destinations, allowed lanes, and carbon cap settings.')
+   if new_shortage>0.01:
+    st.warning(f'{new_shortage:.1f} GWh remains unserved under the selected constraints. Further capacity alone may not close the gap if carbon restrictions or routing eligibility bind.')
+   else:
+    st.success('All capturable target demand is allocated under the selected model assumptions. This is not a guarantee of physical deliverability.')
+   evidence=pd.DataFrame({'metric':['Year','Expansion GWh','Baseline shortage GWh','Expanded shortage GWh','Baseline EU allocation GWh','Expanded EU allocation GWh'], 'value':[year,expansion,base_shortage,new_shortage,eu_base,eu_new]})
+   st.download_button('Download expansion scenario CSV',evidence.to_csv(index=False).encode('utf-8-sig'),file_name=f'expansion_scenario_{year}.csv',mime='text/csv')
